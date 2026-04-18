@@ -37,7 +37,17 @@ df["DescriptionVector"] = df["Description"].apply(lambda x: model.encode(x))
 
 # Create new index in Elasticsearch
 if es.indices.exists(index="all_products"):
-    logger.info("Deleting existing index")
+    logger.info(f"Deleting existing index")
     es.indices.delete(index="all_products")
 es.indices.create(index="all_products", mappings=indexMapping)
-logger.info("Index created")
+logger.info(f"Index created")
+
+# Ingest the data into index
+record_list = df.to_dict("records")
+for record in record_list:
+    try:
+        es.index(index="all_products", document=record, id=record["ProductID"])
+    except Exception as e:
+        print(e)
+
+print(es.count(index="all_products"))
