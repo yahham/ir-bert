@@ -1,10 +1,14 @@
 import os
+import logging
 import pandas as pd
 from dotenv import load_dotenv
 from elasticsearch import Elasticsearch
 from sentence_transformers import SentenceTransformer
+from indexMapping import indexMapping
 
 load_dotenv()
+
+logger = logging.getLogger(__name__)
 
 es = Elasticsearch(
     os.getenv("ES_HOST"),
@@ -31,4 +35,9 @@ model = SentenceTransformer("sentence-transformers/all-mpnet-base-v2")
 
 df["DescriptionVector"] = df["Description"].apply(lambda x: model.encode(x))
 
-print(df.head())
+# Create new index in Elasticsearch
+if es.indices.exists(index="all_products"):
+    logger.info("Deleting existing index")
+    es.indices.delete(index="all_products")
+es.indices.create(index="all_products", mappings=indexMapping)
+logger.info("Index created")
