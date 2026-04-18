@@ -1,4 +1,5 @@
 import os
+import pandas as pd
 from dotenv import load_dotenv
 from elasticsearch import Elasticsearch
 
@@ -14,3 +15,12 @@ es = Elasticsearch(
 )
 
 print(es.ping())
+
+# Prepare the data
+df = pd.read_csv("datasets/myntra_products_catalog.csv").loc[:499]
+
+print(df.head())
+
+df.fillna("None", inplace=True)
+
+print(df.isna().value_counts())
