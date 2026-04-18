@@ -50,4 +50,16 @@ for record in record_list:
     except Exception as e:
         print(e)
 
-print(es.count(index="all_products"))
+# Search the data
+input_keyword = "Blue Shoes"
+vector_of_input_keyword = model.encode(input_keyword)
+
+query = {
+    "field" : "DescriptionVector",
+    "query_vector" : vector_of_input_keyword,
+    "k" : 2,
+    "num_candidates" : 500, 
+}
+
+res = es.search(index="all_products", knn=query, source=["ProductName","Description"])
+res["hits"]["hits"]
