@@ -35,7 +35,7 @@ def search(input_keyword):
         "k": 10,
         "num_candidates": 500
     }
-    res = es.knn_search(index="all_products", knn=query, source=["ProductName","Description"])
+    res = es.search(index="all_products", knn=query, source=["ProductName","Description"])
     results = res["hits"]["hits"]
 
     return results
