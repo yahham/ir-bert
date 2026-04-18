@@ -2,6 +2,7 @@ import os
 import pandas as pd
 from dotenv import load_dotenv
 from elasticsearch import Elasticsearch
+from sentence_transformers import SentenceTransformer
 
 load_dotenv()
 
@@ -24,3 +25,10 @@ print(df.head())
 df.fillna("None", inplace=True)
 
 print(df.isna().value_counts())
+
+# Convert the relevant field to Vector using BERT model
+model = SentenceTransformer("sentence-transformers/all-mpnet-base-v2")
+
+df["DescriptionVector"] = df["Description"].apply(lambda x: model.encode(x))
+
+print(df.head())
