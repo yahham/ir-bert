@@ -6,7 +6,9 @@ from sentence_transformers import SentenceTransformer
 
 load_dotenv()
 
-indexName = "all_products"
+INDEX_NAME = "beir_scifact"
+
+# ── Connect ────────────────────────────────────────────────────────────────────
 
 try:
     es = Elasticsearch(
@@ -17,56 +19,68 @@ try:
         max_retries=3,
         retry_on_timeout=True,
     )
-except ConnectionError as e:
-    print("Connection Error:", e)
-    
-if es.ping():
-    print("Succesfully connected to ElasticSearch!!")
-else:
-    print("Oops!! Can not connect to Elasticsearch!")
+except Exception as e:
+    st.error(f"Elasticsearch connection error: {e}")
+    st.stop()
 
-def search(input_keyword):
-    model = SentenceTransformer('all-mpnet-base-v2')
-    vector_of_input_keyword = model.encode(input_keyword)
+# Cache the model so it is loaded only once across Streamlit reruns
+@st.cache_resource
+def load_model():
+    return SentenceTransformer("sentence-transformers/all-mpnet-base-v2")
 
-    query = {
-        "field": "DescriptionVector",
-        "query_vector": vector_of_input_keyword,
-        "k": 10,
-        "num_candidates": 500
-    }
-    res = es.search(index="all_products", knn=query, source=["ProductName","Description"])
-    results = res["hits"]["hits"]
+# ── Search function ────────────────────────────────────────────────────────────
 
-    return results
+def search(query_text: str, top_k: int = 10):
+    model        = load_model()
+    query_vector = model.encode(
+        query_text,
+        normalize_embeddings=True,
+        convert_to_numpy=True,
+    ).tolist()
+
+    resp = es.search(
+        index=INDEX_NAME,
+        knn={
+            "field":          "embedding",
+            "query_vector":   query_vector,
+            "k":              top_k,
+            "num_candidates": top_k * 5,
+        },
+        size=top_k,
+        source=["doc_id", "title", "text"],
+    )
+    return resp["hits"]["hits"]
+
+# ── Streamlit UI ───────────────────────────────────────────────────────────────
 
 def main():
-    st.title("Search Myntra Fashion Products")
+    st.set_page_config(page_title="BERT Search — SciFact", layout="wide")
+    st.title("🔬 BERT Semantic Search — SciFact")
+    st.caption(
+        "Uses `sentence-transformers/all-mpnet-base-v2` embeddings "
+        "stored in Elasticsearch with cosine KNN search."
+    )
 
-    # Input: User enters search query
-    search_query = st.text_input("Enter your search query")
+    query_text = st.text_input("Enter your scientific query:", placeholder="e.g. smoking causes lung cancer")
+    top_k      = st.slider("Number of results", min_value=1, max_value=20, value=10)
 
-    # Button: User triggers the search
-    if st.button("Search"):
-        if search_query:
-            # Perform the search and get results
-            results = search(search_query)
+    if st.button("Search") and query_text.strip():
+        with st.spinner("Encoding query and searching..."):
+            results = search(query_text.strip(), top_k=top_k)
 
-            # Display search results
-            st.subheader("Search Results")
-            for result in results:
-                with st.container():
-                    if '_source' in result:
-                        try:
-                            st.header(f"{result['_source']['ProductName']}")
-                        except Exception as e:
-                            print(e)
-                        
-                        try:
-                            st.write(f"Description: {result['_source']['Description']}")
-                        except Exception as e:
-                            print(e)
-                        st.divider()
-                    
+        if not results:
+            st.warning("No results found.")
+            return
+
+        st.subheader(f"Top {len(results)} results")
+        for i, hit in enumerate(results, start=1):
+            src   = hit.get("_source", {})
+            score = hit.get("_score", 0.0)
+            with st.container():
+                st.markdown(f"**{i}. {src.get('title', 'No title')}**")
+                st.caption(f"Doc ID: `{src.get('doc_id', hit['_id'])}` | Cosine similarity: `{score:.4f}`")
+                st.write(src.get("text", ""))
+                st.divider()
+
 if __name__ == "__main__":
     main()

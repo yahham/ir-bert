@@ -1,65 +1,135 @@
 import os
+import json
 import logging
-import pandas as pd
 from dotenv import load_dotenv
-from elasticsearch import Elasticsearch
+from elasticsearch import Elasticsearch, helpers
 from sentence_transformers import SentenceTransformer
+from tqdm import tqdm
 from indexMapping import indexMapping
 
 load_dotenv()
-
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
+
+# ── Elasticsearch connection ───────────────────────────────────────────────────
 
 es = Elasticsearch(
     os.getenv("ES_HOST"),
     basic_auth=(os.getenv("ES_USERNAME"), os.getenv("ES_PASSWORD")),
     ca_certs=os.getenv("ES_CA_CERT"),
-    request_timeout=60,
+    request_timeout=120,
     max_retries=3,
     retry_on_timeout=True,
 )
 
-print(es.ping())
+if not es.ping():
+    raise RuntimeError("Cannot connect to Elasticsearch. Check your .env settings.")
+logger.info("Connected to Elasticsearch.")
 
-# Prepare the data
-df = pd.read_csv("datasets/myntra_products_catalog.csv").loc[:499]
+INDEX_NAME   = "beir_scifact"
+DATASET_PATH = os.getenv("BEIR_DATASET_PATH", "../../datasets/scifact")
+CORPUS_FILE  = os.path.join(DATASET_PATH, "corpus.jsonl")
+BATCH_SIZE   = 64   # number of documents to encode at once before bulk-indexing
 
-print(df.head())
+# ── Load corpus ────────────────────────────────────────────────────────────────
 
-df.fillna("None", inplace=True)
+logger.info(f"Loading corpus from {CORPUS_FILE} ...")
+corpus = []
+with open(CORPUS_FILE, "r", encoding="utf-8") as f:
+    for line in f:
+        line = line.strip()
+        if not line:
+            continue
+        doc = json.loads(line)
+        title     = doc.get("title", "") or ""
+        text      = doc.get("text",  "") or ""
+        full_text = f"{title} {text}".strip() if title else text
+        corpus.append({
+            "doc_id":    doc["_id"],
+            "title":     title,
+            "text":      text,
+            "full_text": full_text,
+        })
 
-print(df.isna().value_counts())
+logger.info(f"Loaded {len(corpus)} documents.")
 
-# Convert the relevant field to Vector using BERT model
+# ── Load BERT model ────────────────────────────────────────────────────────────
+
+logger.info("Loading BERT model (all-mpnet-base-v2)...")
 model = SentenceTransformer("sentence-transformers/all-mpnet-base-v2")
+logger.info("Model loaded.")
 
-df["DescriptionVector"] = df["Description"].apply(lambda x: model.encode(x))
+# ── Create / recreate index ────────────────────────────────────────────────────
 
-# Create new index in Elasticsearch
-if es.indices.exists(index="all_products"):
-    logger.info(f"Deleting existing index")
-    es.indices.delete(index="all_products")
-es.indices.create(index="all_products", mappings=indexMapping)
-logger.info(f"Index created")
+if es.indices.exists(index=INDEX_NAME):
+    logger.info(f"Deleting existing index '{INDEX_NAME}'...")
+    es.indices.delete(index=INDEX_NAME)
 
-# Ingest the data into index
-record_list = df.to_dict("records")
-for record in record_list:
-    try:
-        es.index(index="all_products", document=record, id=record["ProductID"])
-    except Exception as e:
-        print(e)
+es.indices.create(index=INDEX_NAME, mappings=indexMapping)
+logger.info(f"Index '{INDEX_NAME}' created.")
 
-# Search the data
-input_keyword = "Blue Shoes"
-vector_of_input_keyword = model.encode(input_keyword)
+# ── Encode and index in batches ────────────────────────────────────────────────
+#
+# Encoding 5,183 documents one at a time would take ~30 minutes on CPU.
+# Batching brings this down to ~3-5 minutes on CPU, seconds on GPU.
 
-query = {
-    "field" : "DescriptionVector",
-    "query_vector" : vector_of_input_keyword,
-    "k" : 2,
-    "num_candidates" : 500, 
-}
+def generate_actions(corpus, model, batch_size):
+    """
+    Generator that encodes documents in batches and yields
+    Elasticsearch bulk-index actions one document at a time.
+    """
+    for batch_start in range(0, len(corpus), batch_size):
+        batch = corpus[batch_start : batch_start + batch_size]
+        texts = [doc["full_text"] for doc in batch]
 
-res = es.search(index="all_products", knn=query, source=["ProductName","Description"])
-res["hits"]["hits"]
+        # encode() returns a numpy array of shape (batch_size, 768)
+        embeddings = model.encode(
+            texts,
+            batch_size=batch_size,
+            show_progress_bar=False,
+            convert_to_numpy=True,
+            normalize_embeddings=True,  # unit-norm vectors make cosine = dot product
+        )
+
+        for doc, embedding in zip(batch, embeddings):
+            yield {
+                "_index": INDEX_NAME,
+                "_id":    doc["doc_id"],
+                "_source": {
+                    "doc_id":    doc["doc_id"],
+                    "title":     doc["title"],
+                    "text":      doc["text"],
+                    "full_text": doc["full_text"],
+                    "embedding": embedding.tolist(),
+                },
+            }
+
+logger.info("Encoding and indexing documents...")
+total_indexed = 0
+errors        = []
+
+# helpers.streaming_bulk handles retries and error collection automatically
+for ok, info in tqdm(
+    helpers.streaming_bulk(
+        es,
+        generate_actions(corpus, model, BATCH_SIZE),
+        chunk_size=100,          # how many docs per HTTP bulk request
+        raise_on_error=False,
+    ),
+    total=len(corpus),
+    desc="Indexing",
+):
+    if ok:
+        total_indexed += 1
+    else:
+        errors.append(info)
+
+logger.info(f"Indexed {total_indexed}/{len(corpus)} documents.")
+if errors:
+    logger.warning(f"{len(errors)} documents failed to index.")
+    for err in errors[:5]:   # show first 5 errors only
+        logger.warning(err)
+
+# Force a refresh so documents are searchable immediately
+es.indices.refresh(index=INDEX_NAME)
+logger.info("Index refreshed. Ready for search and evaluation.")

@@ -1,35 +1,30 @@
 indexMapping = {
-    "properties":{
-        "ProductID":{
-            "type":"long"
+    "properties": {
+        # BEIR document ID (e.g. "4983", "13728")
+        "doc_id": {
+            "type": "keyword"
         },
-        "ProductName":{
-            "type":"text"
+        # Title of the scientific abstract
+        "title": {
+            "type": "text",
+            "analyzer": "english"
         },
-        "ProductBrand":{
-            "type":"text"
+        # Full abstract text
+        "text": {
+            "type": "text",
+            "analyzer": "english"
         },
-        "Gender":{
-            "type":"text"
+        # Combined title + text, used for display
+        "full_text": {
+            "type": "text",
+            "analyzer": "english"
         },
-        "Price (INR)":{
-            "type":"long"
-        },
-        "NumImages":{
-            "type":"long"
-        },
-        "Description":{
-            "type":"text"
-        },
-        "PrimaryColor":{
-            "type":"text"
-        },
-        "DescriptionVector":{
-            "type":"dense_vector",
+        # 768-dim BERT embedding of full_text
+        "embedding": {
+            "type": "dense_vector",
             "dims": 768,
-            "index":True,
+            "index": True,
             "similarity": "cosine"
         }
-
     }
 }
